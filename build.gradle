@@ -1,0 +1,169 @@
+plugins {
+	id 'fabric-loom' version '1.7-SNAPSHOT'
+	id 'maven-publish'
+}
+
+version = project.mod_version + "-" + minecraft_version
+group = project.maven_group
+
+base {
+	archivesName = project.archives_base_name
+}
+
+repositories {
+	// Add repositories to retrieve artifacts from in here.
+	// You should only use this when depending on other mods because
+	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
+	// See https://docs.gradle.org/current/userguide/declaring_repositories.html
+	// for more information about repositories.
+	exclusiveContent {
+		forRepository {
+			maven {
+				name = "Modrinth"
+				url = "https://api.modrinth.com/maven"
+			}
+		}
+		filter {
+			includeGroup "maven.modrinth"
+		}
+	}
+}
+
+loom {
+    splitEnvironmentSourceSets()
+
+	mods {
+		"bbs" {
+			sourceSet sourceSets.main
+		}
+	}
+
+}
+
+def generatedNativeResources = layout.buildDirectory.dir("generated/bbsar-audio")
+def nativeAudioSource = file("src/client/native/bbsar_audio.cpp")
+def nativeAudioLibrary = generatedNativeResources.map { it.file("bbsar/natives/windows-x64/bbsar_audio.dll") }
+
+sourceSets.client.resources.srcDir(generatedNativeResources)
+
+def compileBbsarAudio = tasks.register("compileBbsarAudio") {
+	inputs.file(nativeAudioSource)
+	outputs.file(nativeAudioLibrary)
+	onlyIf { org.gradle.internal.os.OperatingSystem.current().isWindows() }
+
+	doLast {
+		if (!(System.getProperty("os.arch").equalsIgnoreCase("amd64") ||
+		      System.getProperty("os.arch").equalsIgnoreCase("x86_64")))
+		{
+			throw new GradleException("BBSAR's WASAPI capture library currently requires Windows x64.")
+		}
+
+		def programFiles = System.getenv("ProgramFiles(x86)") ?: "C:\\Program Files (x86)"
+		def vswhere = file("${programFiles}\\Microsoft Visual Studio\\Installer\\vswhere.exe")
+
+		if (!vswhere.isFile())
+		{
+			throw new GradleException("Visual Studio C++ Build Tools are required to build BBSAR's WASAPI audio capture library.")
+		}
+
+		def query = new ProcessBuilder(
+			vswhere.absolutePath,
+			"-latest",
+			"-products", "*",
+			"-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+			"-property", "installationPath"
+		).redirectErrorStream(true).start()
+		def visualStudioPath = query.inputStream.getText("UTF-8").trim()
+
+		if (query.waitFor() != 0 || visualStudioPath.isEmpty())
+		{
+			throw new GradleException("Could not locate Visual Studio C++ Build Tools. Install the x64/x86 C++ build tools workload.")
+		}
+
+		def vcvars = file("${visualStudioPath}\\VC\\Auxiliary\\Build\\vcvars64.bat")
+		def output = nativeAudioLibrary.get().asFile
+		output.parentFile.mkdirs()
+
+		if (!vcvars.isFile())
+		{
+			throw new GradleException("Visual Studio's vcvars64.bat was not found at ${vcvars}.")
+		}
+
+		def javaHome = System.getProperty("java.home")
+		def command = "call \"${vcvars}\" >nul && cl.exe /nologo /LD /O2 /EHsc /std:c++17 /I\"${javaHome}\\include\" /I\"${javaHome}\\include\\win32\" \"${nativeAudioSource.absolutePath}\" /link /OUT:\"${output.absolutePath}\" ole32.lib"
+
+		exec {
+			workingDir output.parentFile
+			commandLine "cmd.exe", "/d", "/s", "/c", command
+		}
+	}
+}
+
+tasks.matching { it.name == "processClientResources" || it.name == "sourcesJar" }.configureEach {
+	dependsOn(compileBbsarAudio)
+}
+
+dependencies {
+	// To change the versions see the gradle.properties file
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+	// Fabric API. This is technically optional, but you probably want it anyway.
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+	
+	// Uncomment the following line to enable the deprecated Fabric API modules. 
+	// These are included in the Fabric API production distribution and allow you to update your mod to the latest modules at a later more convenient time.
+
+	// modImplementation "net.fabricmc.fabric-api:fabric-api-deprecated:${project.fabric_version}"
+	modImplementation "maven.modrinth:sodium:mc1.21-0.5.11"
+	modCompileOnly "maven.modrinth:iris:1.7.3+1.21"
+
+	modImplementation "org.anarres:jcpp:1.4.14"
+	modImplementation "io.github.douira:glsl-transformer:2.0.0-pre13"
+}
+
+processResources {
+	inputs.property "version", project.version
+
+	filesMatching("fabric.mod.json") {
+		expand "version": project.version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 21
+}
+
+java {
+	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
+	// if it is present.
+	// If you remove this line, sources will not be generated.
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar {
+	from("LICENSE.md") {
+		rename { "${it}_${project.base.archivesName.get()}"}
+	}
+}
+
+// configure the maven publication
+publishing {
+	publications {
+		mavenJava(MavenPublication) {
+			from components.java
+		}
+	}
+
+	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
+	repositories {
+		// Add repositories to publish to here.
+		// Notice: This block does NOT have the same function as the block in the top level.
+		// The repositories here will be used for publishing your artifact, not for
+		// retrieving dependencies.
+	}
+}
